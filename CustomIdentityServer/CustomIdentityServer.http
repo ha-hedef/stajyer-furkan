@@ -1,0 +1,6 @@
+@CustomIdentityServer_HostAddress = http://localhost:5206
+
+GET {{CustomIdentityServer_HostAddress}}/weatherforecast/
+Accept: application/json
+
+###
