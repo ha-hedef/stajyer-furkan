@@ -50,6 +50,7 @@ public partial class Program
             builder.Services.AddScoped<IEmailService, SmtpEmailService>();
         }
         builder.Services.AddScoped<OtpService>();
+        builder.Services.AddScoped<TokenService>();
 
         builder.Services.AddAuthorization();
 

@@ -12,5 +12,7 @@ namespace CustomIdentityServer.Data
         public DbSet<PrivacyPolicyConsent> PrivacyPolicyConsents { get; set; }
         public DbSet<LoginAttemptLog> LoginAttemptLogs { get; set; }
         public DbSet<OtpCode> OtpCodes { get; set; }
+        public DbSet<RefreshToken> RefreshTokens { get; set; }
+
     }
 }

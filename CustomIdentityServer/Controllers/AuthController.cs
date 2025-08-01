@@ -27,6 +27,7 @@ namespace CustomIdentityServer.Controllers
         private readonly OtpService _otpService;
         private readonly IEmailService _emailService; // Eksik alan eklendi
         private readonly RoleManager<IdentityRole> _roleManager;
+        private readonly TokenService _tokenService; // Eksik alan eklendi
 
         public AuthController(
             UserManager<ApplicationUser> userManager,
@@ -34,7 +35,8 @@ namespace CustomIdentityServer.Controllers
             OtpService otpService,
             AppDbContext context,
             IEmailService emailService,
-            RoleManager<IdentityRole> roleManager) // Eklendi
+            RoleManager<IdentityRole> roleManager,// Eklendi
+            TokenService tokenService)
         {
             _userManager = userManager;
             _configuration = configuration;
@@ -42,6 +44,8 @@ namespace CustomIdentityServer.Controllers
             _context = context;
             _emailService = emailService;
             _roleManager = roleManager; // Eklendi
+            _tokenService = tokenService;
+            
         }
 
         [HttpPost("register")]
@@ -173,29 +177,35 @@ namespace CustomIdentityServer.Controllers
         {
             if (!ModelState.IsValid)
                 return BadRequest(ModelState);
+
             var user = await _userManager.FindByNameAsync(dto.Username);
             if (user == null)
                 return Unauthorized("User not found");
+
             var isValid = await _otpService.VerifyOtpAsync(user.Id, dto.Code);
             if (!isValid)
                 return Unauthorized("Invalid or expired OTP");
 
-            // Başarılı giriş logla ve başarısız denemeleri temizle
+            // Başarılı giriş logla
             _context.LoginAttemptLogs.Add(new LoginAttemptLog
             {
                 UserId = user.Id,
                 IsSuccessful = true,
                 AttemptTime = DateTime.UtcNow
             });
+
             var oldFailed = _context.LoginAttemptLogs.Where(l => l.UserId == user.Id && !l.IsSuccessful);
             _context.LoginAttemptLogs.RemoveRange(oldFailed);
             await _context.SaveChangesAsync();
+
             if (user.LockoutEnabled || user.LockoutEnd != null)
             {
                 user.LockoutEnabled = false;
                 user.LockoutEnd = null;
                 await _userManager.UpdateAsync(user);
             }
+
+            // Access Token üret
             var jwtKey = _configuration["Jwt:Key"];
             if (string.IsNullOrWhiteSpace(jwtKey))
                 return StatusCode(500, "JWT key is not configured.");
@@ -207,21 +217,30 @@ namespace CustomIdentityServer.Controllers
                 new Claim(JwtRegisteredClaimNames.Jti, Guid.NewGuid().ToString()),
             };
             foreach (var role in userRoles)
-            {
                 authClaims.Add(new Claim(ClaimTypes.Role, role));
-            }
+
             var key = new SymmetricSecurityKey(Encoding.UTF8.GetBytes(jwtKey));
             var token = new JwtSecurityToken(
-                expires: DateTime.Now.AddHours(1),
+                expires: DateTime.Now.AddMinutes(15), // Access Token süresi kısa
                 claims: authClaims,
                 signingCredentials: new SigningCredentials(key, SecurityAlgorithms.HmacSha256)
             );
+
+            // ✅ Refresh Token üret ve DB’ye kaydet
+            var refreshToken = _tokenService.GenerateRefreshToken();
+            refreshToken.UserId = user.Id;
+
+            _context.RefreshTokens.Add(refreshToken);
+            await _context.SaveChangesAsync();
+
             return Ok(new
             {
-                token = new JwtSecurityTokenHandler().WriteToken(token),
-                expiration = token.ValidTo
+                accessToken = new JwtSecurityTokenHandler().WriteToken(token),
+                accessTokenExpiration = token.ValidTo,
+                refreshToken = refreshToken.Token
             });
         }
+
 
         [HttpPost("send-otp")]
         public async Task<IActionResult> SendOtp([FromBody] OtpRequestDto dto)
@@ -238,7 +257,11 @@ namespace CustomIdentityServer.Controllers
             var body = $"Giriş veya işlem için OTP kodunuz: {code}";
             try
             {
+                if (string.IsNullOrEmpty(user.Email))
+                    return BadRequest("User does not have a valid email.");
+
                 await _emailService.SendEmailAsync(user.Email, subject, body);
+
             }
             catch (Exception)
             {
@@ -290,6 +313,66 @@ namespace CustomIdentityServer.Controllers
 
             return Ok("Password reset link sent via email.");
         }
+
+        [HttpPost("refresh")]
+        public async Task<IActionResult> Refresh([FromBody] string refreshToken)
+        {
+            var storedToken = _context.RefreshTokens.FirstOrDefault(t => t.Token == refreshToken);
+
+            if (storedToken == null || storedToken.ExpiresAt < DateTime.UtcNow || storedToken.IsRevoked)
+                return Unauthorized("Invalid or expired refresh token");
+
+            var userId = storedToken.UserId;
+            if (string.IsNullOrEmpty(userId))
+                return Unauthorized("Invalid refresh token: missing userId");
+
+            var user = await _userManager.FindByIdAsync(userId);
+            if (user == null)
+                return Unauthorized("User not found");
+
+            // Eski refresh token iptal
+            storedToken.IsRevoked = true;
+
+            // Yeni refresh token oluştur
+            var newRefreshToken = _tokenService.GenerateRefreshToken();
+            newRefreshToken.UserId = user.Id;
+            _context.RefreshTokens.Add(newRefreshToken);
+
+            // Yeni Access Token oluştur
+            var jwtKey = _configuration["Jwt:Key"];
+            if (string.IsNullOrEmpty(jwtKey))
+                return StatusCode(500, "JWT key is missing in configuration.");
+
+            var userRoles = await _userManager.GetRolesAsync(user);
+            var authClaims = new List<Claim>
+            {
+                new Claim(ClaimTypes.Name, user.UserName ?? string.Empty),
+                new Claim(JwtRegisteredClaimNames.Jti, Guid.NewGuid().ToString()),
+            };
+
+            foreach (var role in userRoles)
+            {
+                authClaims.Add(new Claim(ClaimTypes.Role, role));
+            }
+
+            var key = new SymmetricSecurityKey(Encoding.UTF8.GetBytes(jwtKey));
+            var token = new JwtSecurityToken(
+                expires: DateTime.UtcNow.AddHours(1),
+                claims: authClaims,
+                signingCredentials: new SigningCredentials(key, SecurityAlgorithms.HmacSha256)
+            );
+
+            await _context.SaveChangesAsync();
+
+            return Ok(new
+            {
+                token = new JwtSecurityTokenHandler().WriteToken(token),
+                expiration = token.ValidTo,
+                refreshToken = newRefreshToken.Token
+            });
+        }
+
+
 
         [HttpPost("reset-password")]
         public async Task<IActionResult> ResetPassword([FromBody] ResetPasswordDto dto)
