@@ -1,6 +1,6 @@
 // filepath: c:\Users\kamis\OneDrive\Masaüstü\stajyer-furkan\custom-identity-client\src\app\dashboard\dashboard.component.ts
 import { Component, OnInit } from '@angular/core';
-import { AuthService } from '../auth/auth.service';
+import { AuthService } from '../services/auth.service';
 import { Router } from '@angular/router';
 
 @Component({
